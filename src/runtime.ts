@@ -520,6 +520,9 @@ export class AntigravityRuntime {
 			this.assertEpoch(epoch);
 			await connection.newSession(cwd, signal);
 			this.assertEpoch(epoch);
+			if (accountId === DEFAULT_ACCOUNT_ID) this.quotaCache = undefined;
+			this.accountQuotaCache.delete(accountId);
+			this.aggregatedQuotaCache = undefined;
 		} finally {
 			relay?.dispose();
 			await connection.close();

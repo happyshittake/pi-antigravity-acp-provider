@@ -1,8 +1,12 @@
-import { normalizeContext } from "@earendil-works/pi-ai";
+import { normalizeContext, type AuthEvent, type AuthPrompt, type ProviderAuthInteraction } from "@earendil-works/pi-ai";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { addAccount, loadAccountsState, resolveAccountAcpDirectory } from "../src/acp/accounts.js";
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
 import { FALLBACK_MODELS } from "../src/models.js";
 import { createAntigravityProvider } from "../src/provider.js";
@@ -65,5 +69,128 @@ describe("native Pi provider", () => {
 		} finally {
 			await runtime.close();
 		}
+	});
+});
+
+describe("OAuth /login multi-account flow", () => {
+	let root: string;
+
+	beforeEach(() => {
+		root = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-provider-login-"));
+		const home = path.join(root, "home");
+		const agentDir = path.join(root, "agent");
+		fs.mkdirSync(home, { recursive: true });
+		fs.mkdirSync(agentDir, { recursive: true });
+		vi.stubEnv("HOME", home);
+		vi.stubEnv("PI_CODING_AGENT_DIR", agentDir);
+		vi.stubEnv("GEMINI_HOME", "");
+		vi.stubEnv("GEMINI_API_KEY", "");
+		vi.spyOn(os, "homedir").mockReturnValue(home);
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		vi.unstubAllEnvs();
+		fs.rmSync(root, { recursive: true, force: true });
+	});
+
+	function createInteraction(responses: string[]): {
+		interaction: ProviderAuthInteraction;
+		prompts: AuthPrompt[];
+		events: AuthEvent[];
+	} {
+		const prompts: AuthPrompt[] = [];
+		const events: AuthEvent[] = [];
+		const queue = [...responses];
+		const controller = new AbortController();
+		return {
+			prompts,
+			events,
+			interaction: {
+				signal: controller.signal,
+				async prompt(prompt) {
+					prompts.push(prompt);
+					const next = queue.shift();
+					if (next === undefined) throw new Error(`Unexpected prompt: ${prompt.type}`);
+					return next;
+				},
+				notify(event) {
+					events.push(event);
+				},
+			},
+		};
+	}
+
+	it("signs straight into default on first login when no account is authenticated", async () => {
+		const runtime = new AntigravityRuntime();
+		const loginSpy = vi.spyOn(runtime, "loginGoogle").mockResolvedValue(undefined);
+		const { provider } = createAntigravityProvider(runtime);
+		const { interaction, prompts } = createInteraction([]);
+
+		await provider.auth.oauth!.login(interaction);
+
+		expect(prompts).toEqual([]);
+		expect(loginSpy).toHaveBeenCalledWith(interaction.signal, expect.any(Function), expect.any(Object), "default");
+		expect(loadAccountsState().accounts).toEqual([]);
+	});
+
+	it("offers account selection once signed in and registers a newly added account", async () => {
+		const defaultDir = resolveAccountAcpDirectory("default");
+		fs.mkdirSync(defaultDir, { recursive: true });
+		fs.writeFileSync(path.join(defaultDir, "acp_token.json"), JSON.stringify({ refresh_token: "rt-default" }));
+
+		const runtime = new AntigravityRuntime();
+		const loginSpy = vi.spyOn(runtime, "loginGoogle").mockResolvedValue(undefined);
+		const { provider } = createAntigravityProvider(runtime);
+		const { interaction, prompts } = createInteraction(["__add_account__", "Work Team"]);
+
+		await provider.auth.oauth!.login(interaction);
+
+		expect(prompts[0]).toMatchObject({
+			type: "select",
+			options: [
+				{ id: "__add_account__", label: "Add new account…" },
+				{ id: "default", label: "default (signed in)" },
+			],
+		});
+		expect(prompts[1]).toMatchObject({ type: "text" });
+		expect(loginSpy).toHaveBeenCalledWith(interaction.signal, expect.any(Function), expect.any(Object), "work-team");
+		expect(loadAccountsState().accounts).toEqual(["work-team"]);
+	});
+
+	it("re-authenticates an existing named account without prompting for a new label", async () => {
+		addAccount("work");
+		const runtime = new AntigravityRuntime();
+		const loginSpy = vi.spyOn(runtime, "loginGoogle").mockResolvedValue(undefined);
+		const { provider } = createAntigravityProvider(runtime);
+		const { interaction, prompts } = createInteraction(["work"]);
+
+		await provider.auth.oauth!.login(interaction);
+
+		expect(prompts).toHaveLength(1);
+		expect(prompts[0]).toMatchObject({
+			type: "select",
+			options: [
+				{ id: "__add_account__", label: "Add new account…" },
+				{ id: "default", label: "default (not signed in)" },
+				{ id: "work", label: "work (not signed in)" },
+			],
+		});
+		expect(loginSpy).toHaveBeenCalledWith(interaction.signal, expect.any(Function), expect.any(Object), "work");
+		expect(loadAccountsState().accounts).toEqual(["work"]);
+	});
+
+	it("does not persist a new account label when login fails", async () => {
+		const defaultDir = resolveAccountAcpDirectory("default");
+		fs.mkdirSync(defaultDir, { recursive: true });
+		fs.writeFileSync(path.join(defaultDir, "acp_token.json"), JSON.stringify({ refresh_token: "rt-default" }));
+
+		const runtime = new AntigravityRuntime();
+		vi.spyOn(runtime, "loginGoogle").mockRejectedValue(new Error("OAuth cancelled"));
+		const { provider } = createAntigravityProvider(runtime);
+		const { interaction } = createInteraction(["__add_account__", "backup"]);
+
+		await expect(provider.auth.oauth!.login(interaction)).rejects.toThrow("OAuth cancelled");
+		expect(loadAccountsState().accounts).toEqual([]);
 	});
 });

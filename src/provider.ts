@@ -5,12 +5,21 @@ import type {
 	TranscriptContext,
 	Model,
 	Provider,
+	ProviderAuthInteraction,
 	RefreshModelsContext,
 	SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 
-import { listAuthenticatedAccountIds } from "./acp/accounts.js";
-import { hasAntigravityAuth } from "./acp/antigravity.js";
+import {
+	addAccount,
+	buildAccountEnv,
+	DEFAULT_ACCOUNT_ID,
+	listAccountIds,
+	listAuthenticatedAccountIds,
+	normalizeAccountLabel,
+	resolveAccountAcpDirectory,
+} from "./acp/accounts.js";
+import { hasAntigravityAuth, inspectAntigravityAuth } from "./acp/antigravity.js";
 import { FALLBACK_MODELS, modelForAcpStream, projectModels, PROVIDER_ID, restoreModels } from "./models.js";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
 
@@ -29,7 +38,14 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 				name: "Google Antigravity (ACP)",
 				loginLabel: "Sign in with Google",
 				async login(interaction) {
-					interaction.notify({ type: "progress", message: "Starting Antigravity Google login…" });
+					const accountId = await selectLoginAccount(interaction);
+					interaction.notify({
+						type: "progress",
+						message:
+							accountId === DEFAULT_ACCOUNT_ID
+								? "Starting Antigravity Google login…"
+								: `Starting Antigravity Google login (${accountId})…`,
+					});
 					await runtime.loginGoogle(
 						interaction.signal,
 						(message) => interaction.notify({ type: "progress", message }),
@@ -49,7 +65,9 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 									signal,
 								}),
 						},
+						accountId,
 					);
+					if (accountId !== DEFAULT_ACCOUNT_ID) addAccount(accountId);
 					return {
 						type: "oauth",
 						// Pi needs a durable credential record so the provider stays visible;
@@ -148,6 +166,46 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 		},
 	};
 	return { provider, runtime };
+}
+
+const ADD_ACCOUNT_OPTION_ID = "__add_account__";
+
+async function selectLoginAccount(interaction: ProviderAuthInteraction): Promise<string> {
+	const accountIds = listAccountIds();
+	const statuses = accountIds.map((id) => {
+		const health = inspectAntigravityAuth(resolveAccountAcpDirectory(id), buildAccountEnv(id));
+		return {
+			id,
+			authed: health.status === "oauth-refreshable" || health.status === "api-key-env",
+		};
+	});
+	// First-time sign-in goes straight to the default profile without an extra prompt.
+	if (statuses.length === 1 && !statuses[0]!.authed) {
+		return DEFAULT_ACCOUNT_ID;
+	}
+	const choice = await interaction.prompt({
+		type: "select",
+		message: "Choose Antigravity account to sign in",
+		options: [
+			{ id: ADD_ACCOUNT_OPTION_ID, label: "Add new account…" },
+			...statuses.map(({ id, authed }) => ({
+				id,
+				label: `${id} (${authed ? "signed in" : "not signed in"})`,
+			})),
+		],
+	});
+	if (choice === ADD_ACCOUNT_OPTION_ID) {
+		const raw = await interaction.prompt({
+			type: "text",
+			message: "Account label (e.g. work, personal)",
+			placeholder: "work",
+		});
+		return normalizeAccountLabel(raw);
+	}
+	if (!accountIds.includes(choice)) {
+		throw new Error(`Unknown Antigravity account '${choice}'.`);
+	}
+	return choice;
 }
 
 function stream(
