@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import { buildPromptParts } from "../src/stream/context.js";
 import { quotaFromPrompt } from "../src/status.js";
-import { usageFromPrompt } from "../src/stream/usage.js";
+import { contextUsageFromPrompt, usageFromPrompt } from "../src/stream/usage.js";
 
 describe("prompt context", () => {
 	it("reconstructs history only for a fresh binding", () => {
@@ -251,5 +251,67 @@ describe("usageFromPrompt", () => {
 			_meta: { quota: { token_count: { input_tokens: -1, output_tokens: "9" } } },
 		});
 		expect(usage.totalTokens).toBe(0);
+	});
+});
+
+describe("contextUsageFromPrompt", () => {
+	it("apportions multi-inference cache reads and writes into contextUsed while preserving the hit rate", () => {
+		const aggregate = usageFromPrompt({
+			stopReason: "end_turn",
+			usage: {
+				totalTokens: 79238,
+				inputTokens: 7301,
+				outputTokens: 457,
+				thoughtTokens: 264,
+				cachedReadTokens: 71480,
+				cachedWriteTokens: 0,
+			},
+		});
+		const mapped = contextUsageFromPrompt(aggregate, 26766, 3);
+		expect(mapped).toMatchObject({
+			input: 2481,
+			cacheRead: 24285,
+			cacheWrite: 0,
+			output: 457,
+			reasoning: 264,
+			totalTokens: 26766,
+		});
+		expect(mapped.input + mapped.cacheRead + mapped.cacheWrite).toBe(26766);
+	});
+
+	it("keeps cacheWrite bounded and non-negative when rounding multi-inference splits", () => {
+		const base = usageFromPrompt({
+			stopReason: "end_turn",
+			usage: { inputTokens: 0, outputTokens: 1, cachedReadTokens: 1, cachedWriteTokens: 1, totalTokens: 3 },
+		});
+		const mapped = contextUsageFromPrompt(base, 1, 2);
+		expect(mapped.input).toBe(0);
+		expect(mapped.cacheRead + mapped.cacheWrite).toBe(1);
+		expect(mapped.totalTokens).toBe(1);
+
+		const empty = usageFromPrompt({ stopReason: "end_turn" });
+		expect(contextUsageFromPrompt(empty, 500, 2)).toMatchObject({
+			input: 500,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 500,
+		});
+	});
+
+	it("keeps single-inference splits verbatim and corrects legacy duplicate cache reads only on exact match", () => {
+		const single = usageFromPrompt({
+			stopReason: "end_turn",
+			usage: { inputTokens: 600, cachedReadTokens: 400, outputTokens: 200, thoughtTokens: 50, totalTokens: 1200 },
+		});
+		expect(contextUsageFromPrompt(single, 1600, 1)).toMatchObject({
+			input: 600,
+			cacheRead: 400,
+			totalTokens: 1200,
+		});
+		expect(contextUsageFromPrompt(single, 1300, 1)).toMatchObject({
+			input: 600,
+			cacheRead: 400,
+			totalTokens: 1300,
+		});
 	});
 });

@@ -33,6 +33,32 @@ export function usageFromPrompt(response: PromptResponse, model?: Model<string>)
 	return usage;
 }
 
+/**
+ * Map a turn's aggregate usage into the context-scoped usage persisted on Pi's assistant message.
+ * Keeps `input + cacheRead <= totalTokens` for Pi's silent-overflow check while preserving the
+ * turn's cache-hit ratio for Pi's footer, session stats, and cache-miss detector.
+ */
+export function contextUsageFromPrompt(usage: Usage, contextUsed: number, inferences: number): Usage {
+	// Legacy agy can count cache reads twice in `used`; ACP 1.5.0 does not. Correct only
+	// a single inference whose reconciled prompt total proves that exact discrepancy.
+	const totalTokens = inferences === 1 && contextUsed === usage.totalTokens + usage.cacheRead
+		? usage.totalTokens
+		: contextUsed;
+	if (inferences <= 1) {
+		return { ...usage, totalTokens };
+	}
+	const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+	if (promptTokens <= 0) {
+		return { ...usage, input: contextUsed, cacheRead: 0, cacheWrite: 0, totalTokens };
+	}
+	// shortcut: ACP usage_update reports only total `used`, not a per-inference cache split, so
+	// apportion contextUsed by the turn's aggregate cache ratio until ACP exposes per-update cache counts.
+	const cacheRead = Math.min(contextUsed, Math.round(contextUsed * (usage.cacheRead / promptTokens)));
+	const cacheWrite = Math.min(contextUsed - cacheRead, Math.round(contextUsed * (usage.cacheWrite / promptTokens)));
+	const input = contextUsed - cacheRead - cacheWrite;
+	return { ...usage, input, cacheRead, cacheWrite, totalTokens };
+}
+
 function resolveInputAndOutput(
 	rawInput: number,
 	rawOutput: number,

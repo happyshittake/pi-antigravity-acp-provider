@@ -225,7 +225,7 @@ Check Pi conformance behavior for `length`; a truncated generation is a complete
 Aggregate inference activity is **not** current context occupancy. Runtime metrics and catalog-based cost estimates retain the aggregate counters. Pi uses the persisted message's `usage.totalTokens` to budget subsequent requests, so the runtime maps context separately:
 
 - With no `usage_update`, retain the reconciled prompt usage.
-- With multiple inference updates, use the latest `usage_update.used` as context size. Set message `input` to that size and `cacheRead` to zero so Pi's silent-overflow check does not use aggregate input/cache counts. Keep aggregate output, reasoning and cost.
+- With multiple inference updates, use the latest `usage_update.used` as context size and apportion it across message `input`, `cacheRead`, and `cacheWrite` using the turn's aggregate prompt ratio (falling back to `input = used`, `cacheRead = 0`, `cacheWrite = 0` when aggregate prompt tokens are zero). This keeps `input + cacheRead <= used` for Pi's silent-overflow check while exposing the turn's cache-hit rate to Pi's footer, session stats, and cache-miss detector. Keep aggregate output, reasoning and cost.
 - With one inference, retain the prompt's input/cache split and use `usage_update.used` as context size. Correct legacy duplicate cache reads **only when** `used === reconciledPromptTotal + cacheRead`, using the reconciled prompt total instead. ACP 1.5.0's already-correct `used` must not have cache reads subtracted again.
 - Zero-valued setup updates do not count as inferences. Context tracking resets before each ACP prompt.
 

@@ -122,6 +122,7 @@ describe("context size from usage_update", () => {
 		expect(message.stopReason).toBe("stop");
 		expect(isContextOverflow(message, model.contextWindow)).toBe(overflow);
 		expect(message.usage.input + message.usage.cacheRead).toBeLessThanOrEqual(message.usage.totalTokens);
+		expect(message.usage.cacheRead > 0).toBe(cacheRead > 0);
 		expect(estimateContextTokens([message]).usageTokens).toBe(message.usage.totalTokens);
 		expect(clampMaxTokensToContext(model, normalizeContext({ messages: [message] }), model.maxTokens)).toBe(budget);
 		expect((await runtime.snapshot()).metrics.totals).toMatchObject({ turns: 1, input, cacheRead, output: 4000 });
@@ -193,8 +194,17 @@ describe("context size from usage_update", () => {
 			if (index === 2) {
 				expect(message.usage).toMatchObject(counters);
 			} else {
-				// The final inference's cache split is unavailable; old ACP's used is an upper bound.
-				expect(message.usage).toMatchObject({ input: context, cacheRead: 0 });
+				const promptTokens = counters.input + counters.cacheRead;
+				const expectedCacheRead = Math.round(context * (counters.cacheRead / promptTokens));
+				expect(message.usage).toMatchObject({
+					input: context - expectedCacheRead,
+					cacheRead: expectedCacheRead,
+					cacheWrite: 0,
+				});
+				expect(message.usage.cacheRead / (message.usage.input + message.usage.cacheRead)).toBeCloseTo(
+					counters.cacheRead / promptTokens,
+					3,
+				);
 			}
 			expect(isContextOverflow(message, model.contextWindow)).toBe(false);
 			expect(message.usage.cost.input).toBeCloseTo(counters.input / 1_000_000, 10);

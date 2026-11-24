@@ -52,7 +52,7 @@ import type { PermissionMode, ToolActivityMode } from "./config.js";
 import { resolveAcpModelId } from "./models.js";
 import { type PromptParts, buildPromptParts, currentSystemInstructions } from "./stream/context.js";
 import { PiEventWriter } from "./stream/pi-events.js";
-import { usageFromPrompt } from "./stream/usage.js";
+import { contextUsageFromPrompt, usageFromPrompt } from "./stream/usage.js";
 import { RuntimeMetrics } from "./status.js";
 
 const PERMISSION_TIMEOUT_MS = 120_000;
@@ -725,22 +725,9 @@ export class AntigravityRuntime {
 					throw new AntigravityAcpError("quota",
 						`Antigravity quota exceeded for ${binding.modelId}.${quota.resetAt ? ` Resets at ${quota.resetAt}.` : ""}`);
 				}
-				if (binding.contextUsed !== undefined) {
-					// Pi checks input + cacheRead for silent overflow, not totalTokens. For multiple inferences,
-					// only the latest context size is known, not its cache split; metrics above keep billed totals.
-					// Legacy agy can count cache reads twice in `used`; ACP 1.5.0 does not. Correct only
-					// a single inference whose reconciled prompt total proves that exact discrepancy.
-					// Never subtract aggregate cache reads from a multi-inference context update.
-					const contextUsed = binding.inferences === 1 && binding.contextUsed === usage.totalTokens + usage.cacheRead
-						? usage.totalTokens
-						: binding.contextUsed;
-					activeWriter.message.usage = {
-						...usage,
-						input: binding.inferences > 1 ? binding.contextUsed : usage.input,
-						cacheRead: binding.inferences > 1 ? 0 : usage.cacheRead,
-						totalTokens: contextUsed,
-					};
-				} else activeWriter.message.usage = usage;
+				activeWriter.message.usage = binding.contextUsed !== undefined
+					? contextUsageFromPrompt(usage, binding.contextUsed, binding.inferences)
+					: usage;
 				activeWriter.message.rawStopReason = response.stopReason;
 				binding.messageCount = binding.pendingContextCount || parts.messageCount;
 				binding.historyFingerprint = binding.pendingContextFingerprint;
