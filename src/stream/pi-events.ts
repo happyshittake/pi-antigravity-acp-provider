@@ -23,6 +23,10 @@ export class PiEventWriter {
 		return this.terminal;
 	}
 
+	get hasEmitted(): boolean {
+		return this.started;
+	}
+
 	constructor(model: Model<Api>) {
 		this.stream = createAssistantMessageEventStream();
 		this.message = {

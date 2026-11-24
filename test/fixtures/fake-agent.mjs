@@ -222,6 +222,8 @@ for await (const line of rl) {
 		if (slash) {
 			const reply = slash !== "usage"
 				? `Intercepted /${slash}`
+				: process.env.FAKE_USAGE_REPLY
+					? process.env.FAKE_USAGE_REPLY
 				: scenario === "usage-unavailable"
 					? "### Session Usage\n- **Session total:** data not available yet\n\n### Quota Limits\n- Unable to retrieve quota status (backend unavailable)"
 					: fs.readFileSync(new URL("./usage-reply.md", import.meta.url), "utf8");
@@ -402,7 +404,23 @@ for await (const line of rl) {
 			}, Number(process.env.FAKE_RETRY_STEP_MS ?? 20));
 			continue;
 		}
-		if (scenario === "quota-exhausted") {
+		if (scenario === "auth-failed") {
+			send({ jsonrpc: "2.0", id, error: { code: -32000, message: "Authentication required" } });
+			continue;
+		}
+		if (scenario === "midturn-quota") {
+			notify({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Partial " } });
+			setTimeout(() => {
+				for (let i = 0; i < 3; i++) {
+					process.stderr.write(
+						"W1114 22:07:04.512301 48213 http_client.go:211] Error 429, Message: Resource has been exhausted (e.g. check quota)., Status: RESOURCE_EXHAUSTED\n" +
+						"I1114 22:07:04.512398 48213 planner_generator.go:359] Encountered retryable api error. retrying in 1s\n",
+					);
+				}
+			}, 20);
+			continue;
+		}
+		if (scenario === "quota-exhausted" || (process.env.FAKE_QUOTA_EXHAUSTED_MODEL && model === process.env.FAKE_QUOTA_EXHAUSTED_MODEL)) {
 			// agy reports exhaustion as a plain reply: no usage, and `refusal` when the SDK flags it.
 			const reset = text.includes("absolute") ? " Your limit will reset on Oct 2, 2026 14:00 UTC."
 				: text.includes("no reset") ? "" : " Your limit will reset in 3 hours, 51 minutes.";
@@ -496,7 +514,7 @@ for await (const line of rl) {
 			method: "session/update",
 			params: {
 				sessionId: params.sessionId,
-				update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Hello" } },
+				update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: process.env.FAKE_ACCOUNT_TAG ? `Hello:${process.env.FAKE_ACCOUNT_TAG}` : "Hello" } },
 			},
 		});
 		send({

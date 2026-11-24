@@ -92,4 +92,40 @@ describe("AcpSessionStore", () => {
 		expect(fs.existsSync(expectedFile)).toBe(true);
 		expect(new AcpSessionStore().get("pi-custom-1")?.acpSessionId).toBe("acp-custom-1");
 	});
+
+	it("persists optional accountId and removes sessions by account", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "antigravity-sessions-acct-"));
+		roots.push(root);
+		const file = path.join(root, "sessions.json");
+		const store = new AcpSessionStore(file);
+		store.save({
+			piSessionId: "pi-default",
+			acpSessionId: "acp-default",
+			acpModelId: "gemini-pro",
+			cwd: "/tmp/project",
+			messageCount: 1,
+			historyFingerprint: "h1",
+			lastActive: Date.now(),
+		});
+		store.save({
+			piSessionId: "pi-work",
+			acpSessionId: "acp-work",
+			acpModelId: "gemini-pro",
+			accountId: "work",
+			cwd: "/tmp/project",
+			messageCount: 1,
+			historyFingerprint: "h2",
+			lastActive: Date.now(),
+		});
+
+		expect(store.get("pi-default")?.accountId).toBeUndefined();
+		expect(store.get("pi-work")?.accountId).toBe("work");
+
+		store.removeByAccount("work");
+		expect(store.get("pi-work")).toBeUndefined();
+		expect(store.get("pi-default")?.acpSessionId).toBe("acp-default");
+
+		store.removeByAccount("default");
+		expect(store.get("pi-default")).toBeUndefined();
+	});
 });

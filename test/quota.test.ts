@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
 	quotaExhaustion,
+	QuotaNoticeBuffer,
 	RESOURCE_EXHAUSTED_STARTUP_MARGIN_MS,
 	RESOURCE_EXHAUSTED_UNKNOWN_DELAY_MS,
 	ResourceExhaustionTracker,
@@ -34,6 +35,48 @@ describe("quotaExhaustion", () => {
 		expect(quotaExhaustion("Usage Limit Reached", now)).toBeUndefined();
 		expect(quotaExhaustion(`${notice()} Anything else.`, now)).toBeUndefined();
 		expect(quotaExhaustion(notice(" Your limit will reset in soon."), now)).toBeUndefined();
+	});
+});
+
+describe("QuotaNoticeBuffer", () => {
+	it("suppresses a split quota notice and returns its reset time", () => {
+		const emitted: string[] = [];
+		const buffer = new QuotaNoticeBuffer((delta) => emitted.push(delta));
+		const full = `\n${notice(" Your limit will reset in 1 hour.")}\n`;
+		for (let i = 0; i < full.length; i += 7) buffer.push(full.slice(i, i + 7));
+		expect(emitted).toEqual([]);
+		expect(buffer.finish(true, now)).toEqual({ resetAt: new Date(now + 3_600_000).toISOString() });
+		expect(emitted).toEqual([]);
+	});
+
+	it("flushes immediately once text diverges from the quota notice prefix", () => {
+		const emitted: string[] = [];
+		const buffer = new QuotaNoticeBuffer((delta) => emitted.push(delta));
+		buffer.push("Usage");
+		expect(emitted).toEqual([]);
+		buffer.push(" guide");
+		expect(emitted).toEqual(["Usage guide"]);
+		buffer.push(" next");
+		expect(emitted).toEqual(["Usage guide", " next"]);
+		expect(buffer.finish(true, now)).toBeUndefined();
+	});
+
+	it("flushes short prefix-matching replies when the turn finishes", () => {
+		const emitted: string[] = [];
+		const buffer = new QuotaNoticeBuffer((delta) => emitted.push(delta));
+		buffer.push("Usa");
+		expect(emitted).toEqual([]);
+		expect(buffer.finish(true, now)).toBeUndefined();
+		expect(emitted).toEqual(["Usa"]);
+	});
+
+	it("flushes buffered text when quota checking is disabled", () => {
+		const emitted: string[] = [];
+		const buffer = new QuotaNoticeBuffer((delta) => emitted.push(delta));
+		buffer.push(notice());
+		expect(emitted).toEqual([]);
+		expect(buffer.finish(false, now)).toBeUndefined();
+		expect(emitted).toEqual([notice()]);
 	});
 });
 

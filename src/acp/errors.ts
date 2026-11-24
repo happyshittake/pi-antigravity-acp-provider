@@ -9,14 +9,21 @@ export type AntigravityAcpErrorCode =
 	| "process_exit"
 	| "invalid_input";
 
+export interface AntigravityAcpErrorOptions extends ErrorOptions {
+	resetAt?: string;
+}
+
 export class AntigravityAcpError extends Error {
+	readonly resetAt: string | undefined;
+
 	constructor(
 		readonly code: AntigravityAcpErrorCode,
 		message: string,
-		options?: ErrorOptions,
+		options?: AntigravityAcpErrorOptions,
 	) {
 		super(message, options);
 		this.name = "AntigravityAcpError";
+		this.resetAt = options?.resetAt;
 	}
 }
 

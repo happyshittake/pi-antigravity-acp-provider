@@ -9,6 +9,7 @@ import type {
 	SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 
+import { listAuthenticatedAccountIds } from "./acp/accounts.js";
 import { hasAntigravityAuth } from "./acp/antigravity.js";
 import { FALLBACK_MODELS, modelForAcpStream, projectModels, PROVIDER_ID, restoreModels } from "./models.js";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
@@ -83,7 +84,7 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 				async check({ ctx, credential }) {
 					if (credential?.key) return { type: "api_key", source: "Pi auth store" };
 					if (await ctx.env("GEMINI_API_KEY")) return { type: "api_key", source: "GEMINI_API_KEY" };
-					if (hasAntigravityAuth()) {
+					if (hasAntigravityAuth() || listAuthenticatedAccountIds().length > 0) {
 						return { type: "api_key", source: "Antigravity OAuth refresh token" };
 					}
 					return undefined;
@@ -96,7 +97,7 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 							source: credential?.key ? "Pi auth store" : "GEMINI_API_KEY",
 						};
 					}
-					if (hasAntigravityAuth()) {
+					if (hasAntigravityAuth() || listAuthenticatedAccountIds().length > 0) {
 						return { auth: { apiKey: MANAGED_AUTH_MARKER }, source: "Antigravity OAuth refresh token" };
 					}
 					return undefined;

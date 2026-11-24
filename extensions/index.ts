@@ -1,9 +1,19 @@
 import type {
 	ExtensionAPI,
 	ExtensionCommandContext,
+	ExtensionUIContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+import {
+	addAccount,
+	buildAccountEnv,
+	DEFAULT_ACCOUNT_ID,
+	listAccountIds,
+	loadAccountsState,
+	normalizeAccountLabel,
+	resolveAccountAcpDirectory,
+} from "../src/acp/accounts.js";
 import { inspectAntigravityAuth } from "../src/acp/antigravity.js";
 import { describeCredentialStorage } from "../src/acp/credential-storage.js";
 import { errorMessage } from "../src/acp/errors.js";
@@ -25,6 +35,7 @@ import {
 	type PermissionMode,
 } from "../src/config.js";
 import {
+	ACCOUNT_CHANGED_CHANNEL,
 	ACP_PROTOCOL_VERSION,
 	ACP_SDK_VERSION,
 	PACKAGE_VERSION,
@@ -57,12 +68,23 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 	const { runtime, provider } = shared;
 	pi.registerProvider(provider);
 
-	// Other extensions ask for quota with `{ reply }` and get exactly one `{ ok, quota | error }`.
+	let activeUi: ExtensionUIContext | undefined;
+	let leaseRenewal: ReturnType<typeof setInterval> | undefined;
+	const unsubscribeHooks = runtime.registerHooks({
+		onNotify: (message, level) => activeUi?.notify(message, level),
+		onAccountChange: (sessionId, accountId) => {
+			pi.events.emit(ACCOUNT_CHANGED_CHANNEL, { sessionId, accountId });
+		},
+	});
+
+	// Other extensions ask for quota with `{ reply, sessionId? }` and get exactly one `{ ok, quota | error }`.
 	const unsubscribeQuota = pi.events.on(QUOTA_REQUEST_CHANNEL, (data) => {
-		const reply = (data as { reply?: unknown } | undefined)?.reply;
+		const request = data as { reply?: unknown; sessionId?: unknown } | undefined;
+		const reply = request?.reply;
 		if (typeof reply !== "function" || claimedQuotaRequests.has(data as object)) return;
 		claimedQuotaRequests.add(data as object);
-		void runtime.quota(undefined).then(
+		const sessionId = typeof request?.sessionId === "string" && request.sessionId ? request.sessionId : undefined;
+		void runtime.quota(undefined, undefined, sessionId ? { conversationId: sessionId } : undefined).then(
 			(quota) => ({ ok: true as const, quota }),
 			(error: unknown) => ({ ok: false as const, error: errorMessage(error) }),
 		).then((result) => {
@@ -147,17 +169,155 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 				ctx.ui.notify(`Antigravity runtime updates: ${requested}`, "info");
 				return;
 			}
-			if (command === "logout" || command === "account" || command === "switch-account") {
-				await runtime.logout();
+			if (command === "switch-account") {
 				ctx.ui.notify(
-					"Local Antigravity credentials and saved ACP sessions were cleared. Run /logout for the old Pi marker, then /login to choose the next account.",
+					"Use /antigravity-acp account list | login [label] | use <label|default> | remove <label> to manage multiple accounts.",
+					"info",
+				);
+				return;
+			}
+			if (command === "account" || command.startsWith("account ")) {
+				activeUi = ctx.ui;
+				const [sub = "list", ...rest] = command.slice("account".length).trim().split(/\s+/).filter(Boolean);
+				const sessionId = ctx.sessionManager.getSessionId();
+				if (sub === "list") {
+					const state = loadAccountsState();
+					const current = runtime.getActiveAccount(sessionId);
+					const cooldowns = runtime.listCooldowns();
+					const now = Date.now();
+					const lines = listAccountIds().map((id) => {
+						const health = inspectAntigravityAuth(resolveAccountAcpDirectory(id), buildAccountEnv(id));
+						const authed = health.status === "oauth-refreshable" || health.status === "api-key-env";
+						const status = authed ? `authenticated (${health.authType ?? health.status})` : "NOT authenticated";
+						const flags = [
+							current === id ? "current" : "",
+							state.preferred === id ? "preferred" : "",
+						].filter(Boolean);
+						const cd = formatAccountCooldowns(id, cooldowns, now);
+						return `${id}${flags.length ? ` (${flags.join(", ")})` : ""} — ${status}${cd ? ` [${cd}]` : ""}`;
+					});
+					ctx.ui.notify(lines.join("\n"), "info");
+					return;
+				}
+				if (sub === "use") {
+					const raw = rest[0];
+					if (!raw) {
+						ctx.ui.notify("Usage: /antigravity-acp account use <label|default>", "warning");
+						return;
+					}
+					let target: string;
+					try {
+						target = raw.trim().toLowerCase() === DEFAULT_ACCOUNT_ID ? DEFAULT_ACCOUNT_ID : normalizeAccountLabel(raw);
+					} catch (error) {
+						ctx.ui.notify(errorMessage(error), "warning");
+						return;
+					}
+					if (!listAccountIds().includes(target)) {
+						ctx.ui.notify(`[antigravity-acp] unknown account '${target}'. Run /antigravity-acp account login ${target}.`, "warning");
+						return;
+					}
+					const health = inspectAntigravityAuth(resolveAccountAcpDirectory(target), buildAccountEnv(target));
+					if (health.status !== "oauth-refreshable" && health.status !== "api-key-env") {
+						ctx.ui.notify(`[antigravity-acp] ${target} is not authenticated. Run /antigravity-acp account login ${target}.`, "warning");
+						return;
+					}
+					await runtime.pinAccount(sessionId, target);
+					ctx.ui.notify(`[antigravity-acp] using ${target}`, "info");
+					return;
+				}
+				if (sub === "remove") {
+					const raw = rest[0];
+					if (!raw) {
+						ctx.ui.notify("Usage: /antigravity-acp account remove <label>", "warning");
+						return;
+					}
+					if (raw.trim().toLowerCase() === DEFAULT_ACCOUNT_ID) {
+						ctx.ui.notify("Cannot remove the default account. Use /antigravity-acp logout default instead.", "warning");
+						return;
+					}
+					let target: string;
+					try {
+						target = normalizeAccountLabel(raw);
+					} catch (error) {
+						ctx.ui.notify(errorMessage(error), "warning");
+						return;
+					}
+					if (!listAccountIds().includes(target)) {
+						ctx.ui.notify(`[antigravity-acp] unknown account '${target}'.`, "warning");
+						return;
+					}
+					await runtime.removeAccountProfile(target);
+					ctx.ui.notify(`Removed account ${target} and cleared its local Antigravity credentials.`, "info");
+					return;
+				}
+				if (sub === "login") {
+					let raw: string | undefined = rest[0];
+					if (!raw) {
+						raw = await ctx.ui.input("Account label (e.g. work, personal)");
+						if (!raw) return;
+					}
+					let target: string;
+					try {
+						target = raw.trim().toLowerCase() === DEFAULT_ACCOUNT_ID ? DEFAULT_ACCOUNT_ID : normalizeAccountLabel(raw);
+					} catch (error) {
+						ctx.ui.notify(errorMessage(error), "warning");
+						return;
+					}
+					try {
+						await runtime.loginGoogle(
+							undefined,
+							(message) => ctx.ui.notify(message, "info"),
+							{
+								showAuthorizationUrl(url, instructions) {
+									ctx.ui.notify(`${instructions}\n\n${url}`, "info");
+								},
+								async promptForCallback() {
+									const value = await ctx.ui.input(
+										"Paste the final localhost callback URL (or authorization code)",
+										"http://127.0.0.1:PORT/?state=…&code=…",
+									);
+									if (!value) throw new Error("Antigravity OAuth login cancelled");
+									return value;
+								},
+							},
+							target,
+						);
+						if (target !== DEFAULT_ACCOUNT_ID) addAccount(target);
+						await runtime.pinAccount(sessionId, target);
+						ctx.ui.notify(`[antigravity-acp] logged in as ${target}`, "info");
+					} catch (error) {
+						ctx.ui.notify(`[antigravity-acp] login failed: ${errorMessage(error)}`, "error");
+					}
+					return;
+				}
+				ctx.ui.notify("Usage: /antigravity-acp account [list|login [label]|use <label|default>|remove <label>]", "warning");
+				return;
+			}
+			if (command === "logout" || command.startsWith("logout ")) {
+				const raw = command.slice("logout".length).trim();
+				let target: string | undefined;
+				if (raw) {
+					try {
+						target = raw.toLowerCase() === DEFAULT_ACCOUNT_ID ? DEFAULT_ACCOUNT_ID : normalizeAccountLabel(raw);
+					} catch (error) {
+						ctx.ui.notify(errorMessage(error), "warning");
+						return;
+					}
+				}
+				await runtime.logout(target);
+				ctx.ui.notify(
+					target
+						? `Local Antigravity credentials and saved ACP sessions for '${target}' were cleared.`
+						: "Local Antigravity credentials and saved ACP sessions were cleared. Run /logout for the old Pi marker, then /login to choose the next account.",
 					"info",
 				);
 				return;
 			}
 			if (command === "quota") {
-				const quota = await runtime.quota(undefined).then(
-					formatQuota,
+				const sessionId = ctx.sessionManager.getSessionId();
+				const cooldowns = runtime.listCooldowns();
+				const quota = await runtime.quota(undefined, undefined, { conversationId: sessionId }).then(
+					(snapshot) => formatQuota(snapshot, cooldowns),
 					(error: unknown) => `Antigravity quota: unavailable (${errorMessage(error)})`,
 				);
 				ctx.ui.notify([quota, formatMetrics((await runtime.snapshot()).metrics)].join("\n"), "info");
@@ -245,13 +405,14 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 					`Runtime: installed=${setup.installedVersion ?? "external/unknown"} approved=${update?.approvedVersion ?? setup.approvedVersion} registry=${update?.latestVersion ?? "unavailable"} updates=${setup.updateMode}; ACP SDK ${ACP_SDK_VERSION}, protocol ${ACP_PROTOCOL_VERSION}`,
 					`Antigravity server: ${entry}`,
 					`Authentication: ${auth.status}${auth.authType ? ` (${auth.authType})` : ""}`,
+					`Accounts: ${listAccountIds().join(", ")} (active=${runtime.getActiveAccount(ctx.sessionManager.getSessionId()) ?? "auto"})`,
 					`Credential storage (preflight): ${describeCredentialStorage()}`,
 					`Requested permission mode: ${permissionModeLabel(snapshot.permissionMode)}`,
 					`Tool activity mode: ${snapshot.toolActivityMode}`,
 					`Active bindings: ${snapshot.bindings}`,
 					formatMetrics(snapshot.metrics),
 					...snapshot.processes.flatMap((item) => [
-						`• pid=${item.pid ?? "?"} generation=${item.generation} model=${item.modelId} confirmedMode=${item.confirmedPermissionMode} alive=${item.alive} restored=${item.restored} agent=${item.agentVersion ?? "?"} mcpHttp=${item.mcpHttp} permission=${item.waitingForPermission} tools=${item.waitingForTools} ignoredStdoutNoise=${item.ignoredStdoutNoiseLines}`,
+						`• pid=${item.pid ?? "?"} account=${item.accountId} generation=${item.generation} model=${item.modelId} confirmedMode=${item.confirmedPermissionMode} alive=${item.alive} restored=${item.restored} agent=${item.agentVersion ?? "?"} mcpHttp=${item.mcpHttp} permission=${item.waitingForPermission} tools=${item.waitingForTools} ignoredStdoutNoise=${item.ignoredStdoutNoiseLines}`,
 						`  omitted Pi tools: ${item.omittedTools.length ? item.omittedTools.map((tool) => `${tool.name} (${tool.reason})`).join("; ") : "none"}`,
 						...(verbose && item.stderrTail ? [`  stderr (redacted): ${item.stderrTail}`] : []),
 					]),
@@ -267,6 +428,12 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
+		activeUi = ctx.ui;
+		if (leaseRenewal) clearInterval(leaseRenewal);
+		leaseRenewal = setInterval(() => {
+			try { runtime.renewLeases(); } catch { /* best-effort lease renewal */ }
+		}, 60_000);
+		leaseRenewal.unref();
 		if (loadConfig().runtimeUpdates !== "notify") return;
 		try {
 			const update = await checkAntigravityAcpUpdate();
@@ -289,6 +456,12 @@ export function registerAntigravityAcp(pi: ExtensionAPI, connectionFactory?: Ant
 	});
 
 	pi.on("session_shutdown", async (event, ctx) => {
+		if (leaseRenewal) {
+			clearInterval(leaseRenewal);
+			leaseRenewal = undefined;
+		}
+		activeUi = undefined;
+		unsubscribeHooks();
 		unsubscribeQuota();
 		await runtime.closeSession(ctx.sessionManager.getSessionId());
 		await releaseSharedRuntime(shared, event.reason);
@@ -320,11 +493,64 @@ function formatMetrics(metrics: {
 	].join("\n");
 }
 
-function formatQuota(snapshot: AntigravityQuotaSnapshot): string {
-	return [
-		"Antigravity quota:",
+function formatQuota(
+	snapshot: AntigravityQuotaSnapshot,
+	cooldowns: Record<string, number> = {},
+	now = Date.now(),
+): string {
+	const multi = (snapshot.total ?? 1) > 1;
+	const header = multi
+		? `Antigravity quota (active: ${snapshot.activeAccount ?? "auto"}, ${snapshot.reported ?? 0}/${snapshot.total} accounts):`
+		: "Antigravity quota:";
+	const lines = [
+		header,
 		...snapshot.groups.map((group) => `  ${group.displayName}: ${group.buckets.length
 			? group.buckets.map((bucket) => `${bucket.window} ${Math.round(bucket.remainingFraction * 100)}%${bucket.resetTime ? ` (resets ${bucket.resetTime})` : ""}`).join(", ")
 			: "no percentage limits reported"}`),
-	].join("\n");
+	];
+	if (snapshot.accounts && snapshot.accounts.length > 1) {
+		lines.push("Accounts:");
+		for (const entry of snapshot.accounts) {
+			const current = snapshot.activeAccount === entry.accountId ? " (current)" : "";
+			const cd = formatAccountCooldowns(entry.accountId, cooldowns, now);
+			const cdSuffix = cd ? ` [${cd}]` : "";
+			if (!entry.ok || !entry.snapshot) {
+				lines.push(`  ${entry.accountId}${current}: unavailable (${entry.error ?? "unknown error"})${cdSuffix}`);
+				continue;
+			}
+			const summary = entry.snapshot.groups
+				.map((group) => {
+					const buckets = group.buckets.map((b) => `${b.window} ${Math.round(b.remainingFraction * 100)}%`).join("/");
+					return `${shortGroupName(group.displayName)} ${buckets || "n/a"}`;
+				})
+				.join(", ");
+			lines.push(`  ${entry.accountId}${current}: ${summary || "n/a"}${cdSuffix}`);
+		}
+	}
+	return lines.join("\n");
+}
+
+function shortGroupName(displayName: string): string {
+	if (/gemini/iu.test(displayName)) return "gem";
+	if (/claude/iu.test(displayName)) return "cl";
+	return (displayName.trim().split(/\s+/u)[0] || "agy").toLowerCase().slice(0, 6);
+}
+
+function formatAccountCooldowns(accountId: string, cooldowns: Record<string, number>, now: number): string {
+	const parts: string[] = [];
+	const authUntil = cooldowns[accountId];
+	if (authUntil && authUntil > now) parts.push(`auth cooldown ${formatRemaining(authUntil - now)}`);
+	const prefix = `${accountId}::`;
+	for (const [key, until] of Object.entries(cooldowns)) {
+		if (!key.startsWith(prefix) || !(until > now)) continue;
+		parts.push(`cooldown ${key.slice(prefix.length)} ${formatRemaining(until - now)}`);
+	}
+	return parts.join(", ");
+}
+
+function formatRemaining(ms: number): string {
+	const minutes = Math.max(1, Math.ceil(ms / 60_000));
+	if (minutes >= 1440) return `${Math.floor(minutes / 1440)}d`;
+	if (minutes >= 60) return `${Math.floor(minutes / 60)}h`;
+	return `${minutes}m`;
 }

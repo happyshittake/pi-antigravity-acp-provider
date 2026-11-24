@@ -7,6 +7,7 @@ export interface SavedSessionRecord {
 	piSessionId: string;
 	acpSessionId: string;
 	acpModelId: string;
+	accountId?: string;
 	cwd: string;
 	messageCount: number;
 	historyFingerprint: string;
@@ -43,6 +44,12 @@ export class AcpSessionStore {
 		withStoreLock(this.file, () => this.write(this.read().filter((record) => record.piSessionId !== piSessionId)));
 	}
 
+	removeByAccount(accountId: string): void {
+		withStoreLock(this.file, () =>
+			this.write(this.read().filter((record) => (record.accountId ?? "default") !== accountId)),
+		);
+	}
+
 	clear(): void {
 		withStoreLock(this.file, () => fs.rmSync(this.file, { force: true }));
 	}
@@ -76,6 +83,7 @@ function validRecord(value: unknown): value is SavedSessionRecord {
 		typeof record.piSessionId === "string" &&
 		typeof record.acpSessionId === "string" &&
 		typeof record.acpModelId === "string" &&
+		(record.accountId === undefined || typeof record.accountId === "string") &&
 		typeof record.cwd === "string" &&
 		Number.isSafeInteger(record.messageCount) &&
 		(record.messageCount ?? -1) >= 0 &&

@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
 import { AntigravityAcpError } from "../src/acp/errors.js";
 import { parseUsageQuota } from "../src/acp/usage-quota.js";
-import { QUOTA_REQUEST_CHANNEL } from "../src/constants.js";
+import { ACCOUNT_CHANGED_CHANNEL, QUOTA_REQUEST_CHANNEL } from "../src/constants.js";
 import { PERMISSION_TOOL_NAME } from "../src/runtime.js";
 import {
 	createFakeContext,
@@ -324,5 +324,76 @@ describe("live quota", () => {
 		await pi.emit("session_shutdown", { reason: "reload" }, ctx);
 
 		expect(pi.listeners.get(QUOTA_REQUEST_CHANNEL)).toHaveLength(0);
+	});
+});
+
+describe("multi-account commands and events", () => {
+	it("supports account list, use, remove, logout <label>, and emits ACCOUNT_CHANGED_CHANNEL", async () => {
+		const { addAccount, resolveAccountAcpDirectory } = await import("../src/acp/accounts.js");
+		const { pi, ctx } = await load("multi-chat");
+		const command = pi.commands.get("antigravity-acp")!;
+		const changed: unknown[] = [];
+		pi.api.events.on(ACCOUNT_CHANGED_CHANNEL, (payload) => changed.push(payload));
+
+		addAccount("work");
+		const workDir = resolveAccountAcpDirectory("work");
+		fs.mkdirSync(workDir, { recursive: true });
+		fs.writeFileSync(path.join(workDir, "acp_token.json"), JSON.stringify({ refresh_token: "rt-work" }));
+
+		await command.handler("account list", ctx as never);
+		const listText = ctx.ui.notify.mock.calls.at(-1)![0] as string;
+		expect(listText).toContain("default");
+		expect(listText).toContain("work");
+		expect(listText).toContain("authenticated");
+
+		await command.handler("account use work", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)).toEqual(["[antigravity-acp] using work", "info"]);
+		expect(changed).toContainEqual({ sessionId: "multi-chat", accountId: "work" });
+
+		await command.handler("logout work", ctx as never);
+		expect(fs.existsSync(path.join(workDir, "acp_token.json"))).toBe(false);
+
+		await command.handler("account remove work", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("Removed account work");
+
+		await command.handler("account remove default", ctx as never);
+		expect(ctx.ui.notify.mock.calls.at(-1)![1]).toBe("warning");
+	});
+
+	it("logs in a named account via account login <label> and renders multi-account quota details", async () => {
+		const { pi, ctx } = await load("login-chat");
+		const { AntigravityRuntime } = await import("../src/runtime.js");
+		const loginSpy = vi.spyOn(AntigravityRuntime.prototype, "loginGoogle").mockResolvedValue(undefined);
+		const command = pi.commands.get("antigravity-acp")!;
+
+		await command.handler("account login team", ctx as never);
+		expect(loginSpy).toHaveBeenCalledWith(undefined, expect.any(Function), expect.any(Object), "team");
+		expect(ctx.ui.notify.mock.calls.at(-1)![0]).toContain("team");
+
+		const multiQuota = {
+			at: now,
+			activeAccount: "team",
+			reported: 1,
+			total: 2,
+			groups: [{ displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.8 }] }],
+			accounts: [
+				{ accountId: "default", ok: false, error: "backend unavailable" },
+				{
+					accountId: "team",
+					ok: true,
+					snapshot: {
+						at: now,
+						groups: [{ displayName: "Gemini Models", buckets: [{ window: "5h", remainingFraction: 0.8 }] }],
+					},
+				},
+			],
+		};
+		(await spyQuota()).mockResolvedValue(multiQuota);
+		await command.handler("quota", ctx as never);
+		const quotaText = ctx.ui.notify.mock.calls.at(-1)![0] as string;
+		expect(quotaText).toContain("Antigravity quota (active: team, 1/2 accounts):");
+		expect(quotaText).toContain("Accounts:");
+		expect(quotaText).toContain("default: unavailable (backend unavailable)");
+		expect(quotaText).toContain("team (current):");
 	});
 });

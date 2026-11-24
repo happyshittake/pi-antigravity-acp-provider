@@ -21,6 +21,69 @@ export function quotaExhaustion(text: string, now = Date.now()): { resetAt?: str
 	return {};
 }
 
+const NOTICE_PREFIX = "Usage Limit Reached\n\nYou have reached your current quota for this period.";
+const NOTICE_MAX_LENGTH = 260;
+
+/** Buffers leading text only while it could still be agy's fixed quota notice,
+ * so pre-output account failover can retry without leaking the notice to Pi. */
+export class QuotaNoticeBuffer {
+	private buffered = "";
+	private passthrough = false;
+
+	constructor(private readonly emitText: (delta: string) => void) {}
+
+	push(delta: string): void {
+		if (!delta) return;
+		if (this.passthrough) {
+			this.emitText(delta);
+			return;
+		}
+		this.buffered += delta;
+		if (this.buffered.length > NOTICE_MAX_LENGTH) {
+			this.flush();
+			return;
+		}
+		const trimmed = this.buffered.trimStart();
+		if (trimmed.length === 0) return;
+		const stillPossible =
+			trimmed.length < NOTICE_PREFIX.length
+				? NOTICE_PREFIX.startsWith(trimmed)
+				: trimmed.startsWith(NOTICE_PREFIX);
+		if (!stillPossible) this.flush();
+	}
+
+	flushBeforeNonText(): void {
+		if (!this.passthrough) this.flush();
+	}
+
+	finish(checkQuota: boolean, now = Date.now()): { resetAt?: string } | undefined {
+		if (this.passthrough) return undefined;
+		const text = this.buffered;
+		if (checkQuota) {
+			const quota = quotaExhaustion(text, now);
+			if (quota) {
+				this.buffered = "";
+				return quota;
+			}
+		}
+		this.flush();
+		return undefined;
+	}
+
+	reset(): void {
+		this.buffered = "";
+		this.passthrough = false;
+	}
+
+	private flush(): void {
+		this.passthrough = true;
+		if (!this.buffered) return;
+		const pending = this.buffered;
+		this.buffered = "";
+		this.emitText(pending);
+	}
+}
+
 /** agy retries a model-path 429 forever, logging only to stderr: no update and no reply.
  * Tolerate this many retries per inference before failing the prompt. */
 export const RESOURCE_EXHAUSTED_MAX_RETRIES = 2;
