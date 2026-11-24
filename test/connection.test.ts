@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
-import { AntigravityAcpError } from "../src/acp/errors.js";
+import { AntigravityAcpError, ERROR_MESSAGE_LIMIT, errorMessage } from "../src/acp/errors.js";
 import { findSessionSelector, sessionModels, sessionModes } from "../src/acp/session-state.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
@@ -278,6 +278,39 @@ describe("AntigravityAcpConnection", () => {
 			);
 			expect((error as Error).message).toContain("<redacted>");
 			expect((error as Error).message).not.toContain("AIza1234567890abcdefghijkl");
+		} finally {
+			await connection.close();
+		}
+	});
+
+	it("keeps trailing redacted stderr on timeout after >4 KB of earlier stderr", async () => {
+		const connection = new AntigravityAcpConnection({
+			cwd: path.dirname(fakeAgent),
+			command: process.execPath,
+			args: [fakeAgent],
+			promptIdleTimeoutMs: 40,
+		});
+		try {
+			await connection.initialize();
+			const session = await connection.newSession(process.cwd());
+			connection.process.child.stderr.push(`startup-banner ${"x".repeat(5_000)}\n`);
+			connection.process.child.stderr.push(`${"y".repeat(14_000)}\n`);
+			connection.process.child.stderr.push(
+				"ERROR: backend stalled api_key=AIza9999999999abcdefghijkl\n",
+			);
+			const error = await connection.prompt({
+				sessionId: session.sessionId,
+				prompt: [{ type: "text", text: "hang" }],
+			}).catch((cause: unknown) => cause);
+			expect(error).toBeInstanceOf(AntigravityAcpError);
+			expect(connection.process.stderrTail).toContain("ERROR: backend stalled api_key=<redacted>");
+			expect(connection.process.stderrTail).not.toContain("startup-banner");
+			expect(connection.process.stderrTail).not.toContain("AIza9999999999abcdefghijkl");
+			const surfaced = errorMessage(error);
+			expect(surfaced).toContain("Antigravity ACP session/prompt timed out: no progress for 40ms:");
+			expect(surfaced).toContain("ERROR: backend stalled api_key=<redacted>");
+			expect(surfaced).not.toContain("AIza9999999999abcdefghijkl");
+			expect(surfaced.length).toBeLessThanOrEqual(ERROR_MESSAGE_LIMIT);
 		} finally {
 			await connection.close();
 		}

@@ -24,9 +24,11 @@ export function abortError(message = "Antigravity ACP request aborted"): Antigra
 	return new AntigravityAcpError("aborted", message);
 }
 
+export const ERROR_MESSAGE_LIMIT = 4_096;
+
 export function errorMessage(cause: unknown): string {
-	if (cause instanceof Error && cause.message) return redact(cause.message);
-	return redact(String(cause));
+	const raw = cause instanceof Error && cause.message ? cause.message : String(cause);
+	return redact(raw).slice(0, ERROR_MESSAGE_LIMIT);
 }
 
 export function redact(text: string): string {
@@ -38,6 +40,5 @@ export function redact(text: string): string {
 		.replace(
 			/((?:["']?(?:access_token|refresh_token|id_token|client_secret|api[-_]?key)["']?)\s*[:=]\s*["']?)[^"'\s,;&}]+/giu,
 			"$1<redacted>",
-		)
-		.slice(0, 4_096);
+		);
 }

@@ -166,7 +166,8 @@ export class AntigravityProcess {
 		this.child = child;
 		child.stderr.setEncoding("utf8");
 		child.stderr.on("data", (chunk: string) => {
-			this.stderr = redact((this.stderr + chunk).slice(-STDERR_LIMIT));
+			// Redact before slicing the tail so secrets crossing the window boundary are scrubbed.
+			this.stderr = redact((this.stderr + chunk).slice(-STDERR_LIMIT * 2)).slice(-STDERR_LIMIT);
 			const lines = (this.stderrPartial + chunk).split("\n");
 			this.stderrPartial = lines.pop()!.slice(-STDERR_LINE_LIMIT);
 			for (const line of lines) {
@@ -257,7 +258,7 @@ export class AntigravityProcess {
 	): void {
 		if (this.settled) return;
 		this.settled = true;
-		resolve({ code, signal, stderrTail: redact(stderrTail) });
+		resolve({ code, signal, stderrTail: redact(stderrTail).slice(-STDERR_LIMIT) });
 	}
 }
 

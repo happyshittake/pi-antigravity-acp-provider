@@ -16,7 +16,7 @@ import {
 
 import { PACKAGE_VERSION } from "../constants.js";
 import { boundedNdjsonStream } from "./bounded-stream.js";
-import { abortError, AntigravityAcpError, redact } from "./errors.js";
+import { abortError, AntigravityAcpError, ERROR_MESSAGE_LIMIT, redact } from "./errors.js";
 import { AntigravityProcess, type AntigravityProcessOptions } from "./process.js";
 import { PromptWatchdog } from "./prompt-watchdog.js";
 import { ResourceExhaustionTracker } from "./quota.js";
@@ -82,10 +82,9 @@ export class AntigravityAcpConnection {
 		void this.protocolFailure.catch(() => undefined);
 		this.processFailure = this.process.exited.then(({ code, signal, stderrTail }) => {
 			const status = signal ? `signal ${signal}` : `code ${String(code)}`;
-			const detail = stderrTail.trim() ? `: ${stderrTail.trim()}` : "";
 			throw new AntigravityAcpError(
 				"process_exit",
-				`Antigravity ACP process exited with ${status}${detail}`,
+				formatStderrError(`Antigravity ACP process exited with ${status}`, stderrTail),
 			);
 		});
 		// Process exit is expected during close; observe it here while active
@@ -415,9 +414,8 @@ export class AntigravityAcpConnection {
 		let rejectStall!: (error: Error) => void;
 		const stalled = new Promise<never>((_resolve, reject) => { rejectStall = reject; });
 		const watchdog = new PromptWatchdog(this.promptIdleTimeoutMs, this.promptWorkIdleTimeoutMs, (busy, ms) => {
-			const detail = this.process.stderrTail.trim() ? `: ${this.process.stderrTail.trim()}` : "";
 			rejectStall(new AntigravityAcpError("timeout",
-				`Antigravity ACP session/prompt timed out: no ${busy ? "tool/permission " : ""}progress for ${ms}ms${detail}`));
+				formatStderrError(`Antigravity ACP session/prompt timed out: no ${busy ? "tool/permission " : ""}progress for ${ms}ms`, this.process.stderrTail)));
 			void this.close().catch(() => undefined);
 		});
 		// agy retries a 429 without updating or answering; fail the prompt before the idle watchdog.
@@ -452,9 +450,12 @@ export class AntigravityAcpConnection {
 				this.processFailure,
 				new Promise<never>((_resolve, reject) => {
 					timer = setTimeout(() => {
-						const detail = this.process.stderrTail.trim() ? `: ${this.process.stderrTail.trim()}` : "";
+						const message = formatStderrError(
+							`Antigravity ACP ${phase} timed out after ${timeoutMs}ms`,
+							this.process.stderrTail,
+						);
 						void this.close();
-						reject(new AntigravityAcpError("timeout", `Antigravity ACP ${phase} timed out after ${timeoutMs}ms${detail}`));
+						reject(new AntigravityAcpError("timeout", message));
 					}, timeoutMs);
 					timer.unref?.();
 				}),
@@ -491,8 +492,17 @@ function classifyError(error: unknown): Error {
 	return error instanceof Error ? error : new Error(String(error));
 }
 
+function formatStderrError(prefix: string, stderrTail: string): string {
+	const trimmed = stderrTail.trim();
+	if (!trimmed) return prefix;
+	const budget = Math.max(0, ERROR_MESSAGE_LIMIT - prefix.length - 2);
+	if (budget === 0) return prefix;
+	const tail = trimmed.length > budget ? trimmed.slice(-budget) : trimmed;
+	return `${prefix}: ${tail}`;
+}
+
 function structuredErrorDetail(data: unknown): string | undefined {
 	if (!data || typeof data !== "object") return undefined;
 	const detail = (data as { details?: unknown }).details;
-	return typeof detail === "string" && detail.trim() ? redact(detail.trim()) : undefined;
+	return typeof detail === "string" && detail.trim() ? redact(detail.trim()).slice(0, ERROR_MESSAGE_LIMIT) : undefined;
 }

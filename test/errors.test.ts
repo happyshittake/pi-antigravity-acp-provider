@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { redact } from "../src/acp/errors.js";
+import { ERROR_MESSAGE_LIMIT, errorMessage, redact } from "../src/acp/errors.js";
 
 describe("diagnostic redaction", () => {
 	it("removes proxy URL credentials and Basic authorization values", () => {
@@ -23,5 +23,13 @@ describe("diagnostic redaction", () => {
 		expect(output).not.toContain("header-secret-value");
 		expect(output).not.toContain("session=secret-value");
 		expect(output.match(/<redacted>/gu)?.length).toBeGreaterThanOrEqual(5);
+	});
+	it("redacts past 4 KB without truncating, while errorMessage caps length", () => {
+		const input = `${"a".repeat(ERROR_MESSAGE_LIMIT + 500)} token=ya29.trailing-secret-token`;
+		const redacted = redact(input);
+		expect(redacted.length).toBeGreaterThan(ERROR_MESSAGE_LIMIT);
+		expect(redacted).toContain("token=<redacted>");
+		expect(redacted).not.toContain("trailing-secret-token");
+		expect(errorMessage(new Error(input)).length).toBe(ERROR_MESSAGE_LIMIT);
 	});
 });
